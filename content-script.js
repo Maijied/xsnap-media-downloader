@@ -14,9 +14,19 @@ async function getSession() {
     "twApiBase"
   ]);
 
+  // Fallback if not captured (e.g. user only browsed feed)
+  // This ID is from the user's recent logs log (Jan 2026)
+  const FALLBACK_ID = "97JF30KziU00483E_8elBA";
+
   if (!twTweetDetailQueryId) {
+    console.warn("XSnap: using fallback TweetDetail QueryId");
+  }
+
+  const finalQueryId = twTweetDetailQueryId || FALLBACK_ID;
+
+  if (!twBearer) {
     throw new Error(
-      "TweetDetail queryId not captured yet. Reload the tweet page and scroll once, then try again."
+      "Bearer token not captured yet. Reload X/Twitter and scroll/open a tweet so an API request happens."
     );
   }
 
@@ -30,7 +40,7 @@ async function getSession() {
     bearer: twBearer,
     csrf: twCsrf || null,
     guest: twGuestToken || null,
-    queryId: twTweetDetailQueryId,
+    queryId: finalQueryId,
     apiBase: twApiBase || (location.origin.includes("x.com") ? "https://x.com" : "https://twitter.com")
   };
 }

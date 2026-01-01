@@ -1,0 +1,44 @@
+{
+  "manifest_version": 2,
+  "name": "XSnap - Media Downloader for X",
+  "version": "1.0.0",
+  "description": "Easily download videos, GIFs, and images from X (formerly Twitter) in all available resolutions. One-click download with quality selection.",
+  "author": "Maijied",
+  "homepage_url": "https://github.com/Maijied/xsnap-media-downloader",
+  "icons": {
+    "48": "icons/icon-48.png",
+    "96": "icons/icon-96.png",
+    "128": "icons/icon-128.png"
+  },
+  "permissions": [
+    "downloads",
+    "storage",
+    "webRequest",
+    "https://x.com/*",
+    "https://twitter.com/*",
+    "https://api.twitter.com/*"
+  ],
+  "background": {
+    "scripts": [
+      "background.js"
+    ]
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://x.com/*",
+        "https://twitter.com/*"
+      ],
+      "js": [
+        "content-script.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "xsnap-media-downloader@maijied.dev",
+      "strict_min_version": "109.0"
+    }
+  }
+}

@@ -1,8 +1,8 @@
 # XSnap - Media Downloader for X
 
-A browser extension to easily download videos, GIFs, and images from X (formerly Twitter) in all available resolutions.
+A Firefox browser extension to easily download videos, GIFs, and images from X (formerly Twitter) in all available resolutions.
 
-![XSnap Icon](firefox/icons/icon-128.png)
+![XSnap Icon](icons/icon-128.png)
 
 ## Features
 
@@ -13,30 +13,19 @@ A browser extension to easily download videos, GIFs, and images from X (formerly
 - 📊 **Quality Selection** - Choose from all available resolutions
 - 🔒 **Privacy Focused** - No data collection, works entirely locally
 
-## Project Structure
-
-This project is organized by browser compatibility:
-
-- `/firefox`: Manifest V2 version optimized for Firefox.
-- `/opera`: Manifest V3 version optimized for Opera and Chrome-based browsers.
-
 ## Installation
 
-### Manual Installation (For Development)
+### From Firefox Add-ons Store
+1. Visit the [XSnap Add-on Page](#) (link coming soon)
+2. Click "Add to Firefox"
+3. Grant the required permissions
 
-#### Firefox
+### Manual Installation (For Development)
 1. Download or clone this repository
 2. Open Firefox and navigate to `about:debugging`
 3. Click "This Firefox" in the sidebar
 4. Click "Load Temporary Add-on"
-5. Select the `manifest.json` file from the `firefox/` folder
-
-#### Opera / Chrome
-1. Download or clone this repository
-2. Open Opera/Chrome and navigate to `opera://extensions` or `chrome://extensions`
-3. Enable "Developer mode"
-4. Click "Load unpacked"
-5. Select the `opera/` folder
+5. Select the `manifest.json` file from this folder
 
 ## Usage
 
@@ -52,8 +41,15 @@ This project is organized by browser compatibility:
 - **downloads**: Required to save files to your computer
 - **storage**: Stores API tokens locally for authenticated requests
 - **webRequest**: Captures authentication tokens from X's API
-- **webRequestExtraHeaders**: (Opera/Chrome) Required to see security headers in Manifest V3
-- **Host permissions**: Required to interact with X's website and API
+- **Host permissions for x.com/twitter.com**: Required to interact with X's website and API
+
+## Technical Details
+
+This extension works by:
+1. Capturing authentication tokens from X's existing API requests
+2. Using X's GraphQL API to fetch media information
+3. Extracting video/image URLs with all available qualities
+4. Downloading media using Firefox's download API
 
 ## Privacy
 
@@ -61,17 +57,29 @@ This project is organized by browser compatibility:
 - **No external servers**: All processing happens locally in your browser
 - **Open source**: Full source code available for review
 
+## Troubleshooting
+
+**Download button not appearing?**
+- Make sure you're on x.com or twitter.com
+- Try refreshing the page
+- Scroll the page to trigger the extension
+
+**Getting errors?**
+- Reload the X/Twitter page and scroll once
+- The extension needs to capture API tokens from normal browsing
+
 ## License
 
 MIT License - see [LICENSE](LICENSE) file for details.
 
-## Changelog
+## Contributing
 
-### v1.0.1
-- Added official support for Opera (Manifest V3)
-- Separated browser-specific builds
+Contributions are welcome! Please feel free to submit issues or pull requests.
+
+## Changelog
 
 ### v1.0.0
 - Initial release
 - Video, GIF, and image download support
 - Quality selection for videos
+- One-click download interface

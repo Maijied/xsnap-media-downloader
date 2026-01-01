@@ -3,7 +3,7 @@
   "name": "XSnap - Media Downloader for X",
   "version": "1.0.0",
   "description": "Easily download videos, GIFs, and images from X (formerly Twitter) in all available resolutions. One-click download with quality selection.",
-  "author": "Maijied",
+  "author": "Maizied Hasan Majumder",
   "homepage_url": "https://github.com/Maijied/xsnap-media-downloader",
   "icons": {
     "48": "icons/icon-48.png",

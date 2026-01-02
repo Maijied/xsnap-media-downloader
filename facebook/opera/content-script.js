@@ -1,4 +1,4 @@
-// FSnap - Facebook Media Downloader Content Script (v1.0.9 - FB Style UI)
+// FSnap - Facebook Media Downloader Content Script (v1.1.0 - Multi-Quality Fix)
 
 const observer = new MutationObserver(() => {
     clearTimeout(window.fsnapTimeout);
@@ -90,25 +90,32 @@ async function handleImageDownload(img) {
 }
 
 async function handleVideoDownload(video) {
-    toast("Hunting for quality...");
+    toast("Hunting for all qualities...");
 
-    let allSources = [];
-    let s1 = await huntForVideoSources(video);
-    let s2 = await deepPageSearch();
-    let s3 = await bruteForceSearch();
-    allSources = [...s1, ...s2, ...s3];
+    // Broad scan
+    const s1 = await huntForVideoSources(video);
+    const s2 = await deepPageSearch();
+    const s3 = await bruteForceSearch();
 
-    // --- STRICT FILTERING (One HD, One SD) ---
-    const finalSources = [];
-    const hd = allSources.find(s => s.quality === 'HD');
-    const sd = allSources.find(s => s.quality === 'SD');
+    // Combine and Deduplicate strictly by URL
+    const all = [...s1, ...s2, ...s3];
+    const uniqueMap = new Map();
 
-    if (hd) finalSources.push(hd);
-    // Only add SD if it's actually a different URL or if no HD was found
-    if (sd && (!hd || sd.url !== hd.url)) finalSources.push(sd);
+    all.forEach(s => {
+        if (!uniqueMap.has(s.url)) {
+            uniqueMap.set(s.url, s);
+        } else if (s.quality === 'HD') {
+            // If we found the same URL with an HD label, upgrade the quality tag
+            uniqueMap.get(s.url).quality = 'HD';
+        }
+    });
+
+    const finalSources = Array.from(uniqueMap.values());
+    // Sort so HD is at top
+    finalSources.sort((a, b) => (a.quality === 'HD' ? -1 : 1));
 
     if (finalSources.length === 0) {
-        toast("Source not found. Please reload or click HD in player.");
+        toast("Source not found. Please reload or play the video.");
         return;
     }
 
@@ -127,9 +134,8 @@ async function huntForVideoSources(video) {
         const text = script.textContent;
         if (text && videoId && text.includes(videoId)) {
             const index = text.indexOf(videoId);
-            const chunk = text.substring(Math.max(0, index - 10000), index + 40000);
+            const chunk = text.substring(Math.max(0, index - 15000), index + 50000);
             extractAdvanced(chunk, found);
-            if (found.length > 0) break;
         }
     }
     return found;
@@ -166,7 +172,20 @@ function extractAdvanced(text, list) {
             }
         });
     });
-    list.sort((a, b) => (a.quality === 'HD' ? -1 : 1));
+
+    // Dash/Representation support
+    const dashMatch = text.match(/"base_url":"(https:[^"]+fbcdn[^"]+)"/g);
+    if (dashMatch) {
+        dashMatch.forEach(m => {
+            const urlMatch = m.match(/"base_url":"([^"]+)"/);
+            if (urlMatch) {
+                const url = sanitize(urlMatch[1]);
+                if (!list.some(x => x.url === url)) {
+                    list.push({ quality: 'SD', url });
+                }
+            }
+        });
+    }
 }
 
 function sanitize(url) { return url.replace(/\\/g, '').replace(/&amp;/g, '&'); }
@@ -178,7 +197,7 @@ function findVideoId(video) {
         if (id && /^\d+$/.test(id)) return id;
         curr = curr.parentElement;
     }
-    const urlMatch = window.location.href.match(/\/(?:videos|reels|watch|shorts)\/(\d+)/);
+    const urlMatch = window.location.href.match(/\/(?:videos|reels|watch|shorts|reel)\/(\d+)/);
     return urlMatch ? urlMatch[1] : null;
 }
 
@@ -203,14 +222,13 @@ function showQualityChooser(sources) {
     const modal = document.createElement("div");
     modal.className = "fsnap-chooser-modal";
     Object.assign(modal.style, {
-        background: "#fff", width: "400px", maxWidth: "90%", borderRadius: "8px",
+        background: "#fff", width: "420px", maxWidth: "90%", borderRadius: "8px",
         boxShadow: "0 12px 28px rgba(0,0,0,0.2), 0 2px 4px rgba(0,0,0,0.1)",
         display: "flex", flexDirection: "column", overflow: "hidden",
         fontFamily: "Segoe UI, Roboto, Helvetica, Arial, sans-serif",
         transform: "scale(0.95)", transition: "transform 0.2s"
     });
 
-    // Header
     const header = document.createElement("div");
     Object.assign(header.style, {
         padding: "16px", borderBottom: "1px solid #ced0d4", display: "flex",
@@ -236,14 +254,15 @@ function showQualityChooser(sources) {
     header.appendChild(closeBtn);
     modal.appendChild(header);
 
-    // Body
-    const body = document.createElement("div");
-    body.style.padding = "16px";
-    body.style.display = "flex";
-    body.style.flexDirection = "column";
-    body.style.gap = "8px";
+    const scrollArea = document.createElement("div");
+    scrollArea.style.maxHeight = "400px";
+    scrollArea.style.overflowY = "auto";
+    scrollArea.style.padding = "16px";
+    scrollArea.style.display = "flex";
+    scrollArea.style.flexDirection = "column";
+    scrollArea.style.gap = "8px";
 
-    sources.forEach(src => {
+    sources.forEach((src, index) => {
         const btn = document.createElement("button");
         btn.style.display = "flex";
         btn.style.alignItems = "center";
@@ -261,13 +280,14 @@ function showQualityChooser(sources) {
         textPart.style.alignItems = "start";
 
         const mainText = document.createElement("span");
-        mainText.textContent = `${src.quality} Resolution`;
+        // Label them as Option 1, 2 etc if multiple are found
+        mainText.textContent = `${src.quality} Download ${sources.filter(x => x.quality === src.quality).length > 1 ? '#' + (sources.filter((x, i) => x.quality === src.quality && i <= index).length) : ''}`;
         mainText.style.fontWeight = "600";
         mainText.style.fontSize = "15px";
         mainText.style.color = "#050505";
 
         const subText = document.createElement("span");
-        subText.textContent = src.quality === 'HD' ? 'Highest available quality' : 'Standard quality';
+        subText.textContent = src.quality === 'HD' ? 'High definition source' : 'Standard definition source';
         subText.style.fontSize = "12px";
         subText.style.color = "#65676b";
 
@@ -282,11 +302,11 @@ function showQualityChooser(sources) {
 
         btn.onmouseenter = () => btn.style.background = "#e4e6eb";
         btn.onmouseleave = () => btn.style.background = "#f0f2f5";
-        btn.onclick = () => { downloadFile(src.url, `fsnap-video-${src.quality}.mp4`); closePopup(overlay, modal); };
-        body.appendChild(btn);
+        btn.onclick = () => { downloadFile(src.url, `fsnap-video-${src.quality}-${index}.mp4`); closePopup(overlay, modal); };
+        scrollArea.appendChild(btn);
     });
 
-    modal.appendChild(body);
+    modal.appendChild(scrollArea);
     overlay.appendChild(modal);
     document.body.appendChild(overlay);
 
@@ -311,11 +331,7 @@ function toast(message) {
         fontSize: "14px", fontWeight: "600", boxShadow: "0 8px 24px rgba(0,0,0,0.2)"
     });
     document.body.appendChild(el);
-    setTimeout(() => {
-        el.style.opacity = "0";
-        el.style.transition = "opacity 0.5s";
-        setTimeout(() => el.remove(), 500);
-    }, 4000);
+    setTimeout(() => { el.style.opacity = "0"; el.style.transition = "opacity 0.5s"; setTimeout(() => el.remove(), 500); }, 4000);
 }
 
 document.head.insertAdjacentHTML('beforeend', `<style>.fsnap-toast { animation: fsnap-slidein 0.3s ease-out; } @keyframes fsnap-slidein { from { opacity: 0; transform: translateX(-20px); } to { opacity: 1; transform: translateX(0); } }</style>`);

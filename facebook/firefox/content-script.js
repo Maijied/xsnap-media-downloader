@@ -1,4 +1,4 @@
-// FSnap - Facebook Media Downloader Content Script (v1.1.7 - ID-First Hunting)
+// FSnap - Facebook Media Downloader Content Script (v1.1.8 - Precision Overhaul)
 
 const observer = new MutationObserver(() => {
     clearTimeout(window.fsnapTimeout);
@@ -98,53 +98,69 @@ async function handleVideoDownload(video) {
     }
 
     let allSources = [];
-    // ID-First strategy: Find ID scripts and extract 50k blocks
     const scripts = Array.from(document.querySelectorAll('script'));
     for (const script of scripts) {
         const text = script.textContent;
         if (text && videoId && text.includes(videoId)) {
-            const index = text.indexOf(videoId);
-            // TRUST ZONE: 50,000 characters around the ID
-            const chunk = text.substring(Math.max(0, index - 25000), index + 25000);
-            extractFromTrustZone(chunk, allSources);
+            // Find all Occurrences of the Video ID to scan around them
+            let pos = text.indexOf(videoId);
+            while (pos !== -1) {
+                // Trust Zone: 10,000 characters around EACH occurrence of the ID
+                const chunk = text.substring(Math.max(0, pos - 5000), pos + 5000);
+                extractVerified(chunk, videoId, allSources);
+                pos = text.indexOf(videoId, pos + 1);
+            }
         }
     }
 
-    // Fallback: search whole page if ID scripts didn't yield enough
+    // Fallback: search whole page strictly
     if (allSources.length === 0) {
-        extractFromTrustZone(document.documentElement.innerHTML, allSources);
+        extractVerified(document.documentElement.innerHTML, videoId, allSources);
     }
 
-    // Deduplicate by URL
-    const urlMap = new Map();
+    // --- DECISIVE DEDUPLICATION ---
+    // Rule: One URL per unique resolution/quality combination.
+    const uniqueMap = new Map();
     allSources.forEach(s => {
-        if (!urlMap.has(s.url)) {
-            urlMap.set(s.url, s);
-        } else {
-            const existing = urlMap.get(s.url);
-            if (s.width && s.height && (!existing.width || !existing.height)) urlMap.set(s.url, s);
+        // Key is based on URL AND Resolution to ensure we don't skip actual variants
+        const key = s.url;
+        if (!uniqueMap.has(key)) {
+            uniqueMap.set(key, s);
         }
     });
 
-    let finalSources = Array.from(urlMap.values());
+    let finalSources = Array.from(uniqueMap.values());
+
+    // Sort by height descending
     finalSources.sort((a, b) => b.height - a.height);
 
-    if (finalSources.length === 0) {
+    // Final UI-level filter: if we have multiple "640x360" entries, only keep the first one
+    const resMap = new Map();
+    const result = [];
+    finalSources.forEach(s => {
+        const resKey = `${s.label}-${s.width}x${s.height}`;
+        if (!resMap.has(resKey)) {
+            resMap.set(resKey, true);
+            result.push(s);
+        }
+    });
+
+    if (result.length === 0) {
         toast("No complete videos found. Play the video and try again.");
         return;
     }
 
-    if (finalSources.length > 1) {
-        showQualityChooser(finalSources);
+    if (result.length > 1) {
+        showQualityChooser(result);
     } else {
-        downloadFile(finalSources[0].url, `fsnap-video-${finalSources[0].height || 'media'}.mp4`);
+        downloadFile(result[0].url, `fsnap-video-${result[0].height || 'media'}.mp4`);
     }
 }
 
 /**
- * TRUST ZONE EXTRACTION: Scans a guaranteed-segment for quality URLs and metadata.
+ * VERIFIED EXTRACTION: Scans a segment and ensures URLs are tied to the Video ID.
  */
-function extractFromTrustZone(text, list) {
+function extractVerified(text, targetId, list) {
     if (!text) return;
 
     const urlKeys = [
@@ -158,37 +174,45 @@ function extractFromTrustZone(text, list) {
         while ((match = regex.exec(text)) !== null) {
             const url = sanitize(match[1]);
             if (url.includes('fbcdn.net')) {
-                // Find nearest resolution metadata
-                const area = text.substring(Math.max(0, match.index - 1000), match.index + 1000);
+                // PROXIMITY CHECK: ID must be within 1200 characters of the URL
+                const proximityCheck = text.substring(Math.max(0, match.index - 1200), match.index + 1200);
+                if (targetId && !proximityCheck.includes(targetId)) continue;
+
+                // RESOLUTION SEARCH
+                const area = text.substring(Math.max(0, match.index - 800), match.index + 800);
                 const hMatch = area.match(/"height":(\d+)/) || area.match(/"height\\":(\d+)/) || area.match(/"pixel_height":(\d+)/) || area.match(/"frame_height":(\d+)/);
                 const wMatch = area.match(/"width":(\d+)/) || area.match(/"width\\":(\d+)/) || area.match(/"pixel_width":(\d+)/) || area.match(/"frame_width":(\d+)/);
 
                 let height = hMatch ? parseInt(hMatch[1]) : 0;
                 let width = wMatch ? parseInt(wMatch[1]) : 0;
 
+                // Determine Quality Label
+                let label = height >= 720 ? 'HD' : 'SD';
+                if (key.includes('hd')) label = 'HD';
+
                 if (!height) {
-                    if (key.includes('hd')) { height = 720; width = 1280; }
+                    if (label === 'HD') { height = 720; width = 1280; }
                     else { height = 360; width = 640; }
                 } else if (!width) {
                     width = Math.round(height * (16 / 9));
                 }
 
                 if (!list.some(x => x.url === url)) {
-                    list.push({ label: height >= 720 ? 'HD' : 'SD', width, height, url });
+                    list.push({ label, width, height, url });
                 }
             }
         }
     });
 
-    // Final raw .mp4 fallback
-    const mp4m = text.match(/"(https:[^"]+?\.mp4[^"]+?)"/g);
-    if (mp4m) {
-        mp4m.forEach(m => {
-            const url = sanitize(m.replace(/"/g, ''));
-            if (url.includes('fbcdn') && !list.some(x => x.url === url)) {
-                list.push({ label: 'SD', width: 640, height: 360, url });
-            }
-        });
+    // Fallback for MP4 links with tighter 600-char ID proximity
+    const mp4Regex = /"(https:[^"]+?\.mp4[^"]+?)"/g;
+    let mp4m;
+    while ((mp4m = mp4Regex.exec(text)) !== null) {
+        const url = sanitize(mp4m[1]);
+        const proximity = text.substring(Math.max(0, mp4m.index - 600), mp4m.index + 600);
+        if (targetId && proximity.includes(targetId) && !list.some(x => x.url === url)) {
+            list.push({ label: 'SD', width: 640, height: 360, url });
+        }
     }
 }
 
@@ -254,8 +278,6 @@ function showQualityChooser(sources) {
     scrollArea.style.maxHeight = "450px"; scrollArea.style.overflowY = "auto"; scrollArea.style.padding = "16px";
     scrollArea.style.display = "flex"; scrollArea.style.flexDirection = "column"; scrollArea.style.gap = "8px";
 
-    const resCounts = {};
-
     sources.forEach((src) => {
         const btn = document.createElement("button");
         Object.assign(btn.style, {
@@ -268,11 +290,7 @@ function showQualityChooser(sources) {
         textPart.style.display = "flex"; textPart.style.flexDirection = "column"; textPart.style.alignItems = "start";
 
         const mainText = document.createElement("span");
-        const resKey = `${src.width}x${src.height}`;
-        resCounts[resKey] = (resCounts[resKey] || 0) + 1;
-        const variantSuffix = sources.filter(x => `${x.width}x${x.height}` === resKey).length > 1 ? ` #${resCounts[resKey]}` : "";
-
-        mainText.textContent = `${src.label} Quality (${src.width} x ${src.height})${variantSuffix}`;
+        mainText.textContent = `${src.label} Quality (${src.width} x ${src.height})`;
         mainText.style.fontWeight = "600"; mainText.style.fontSize = "16px"; mainText.style.color = "#050505";
 
         const subText = document.createElement("span");

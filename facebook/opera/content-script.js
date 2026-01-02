@@ -1,4 +1,4 @@
-// FSnap - Facebook Media Downloader Content Script (v1.1.2 - Resolution Format Fix)
+// FSnap - Facebook Media Downloader Content Script (v1.1.3 - Robust Resolution Fix)
 
 const observer = new MutationObserver(() => {
     clearTimeout(window.fsnapTimeout);
@@ -98,21 +98,21 @@ async function handleVideoDownload(video) {
     const s3 = await bruteForceSearch();
     allSources = [...s1, ...s2, ...s3];
 
-    // Deduplicate by URL
-    const uniqueMap = new Map();
+    // --- STRICT DEDUPLICATION BY RESOLUTION ---
+    const resolutionMap = new Map();
     allSources.forEach(s => {
-        if (!uniqueMap.has(s.url)) {
-            uniqueMap.set(s.url, s);
+        const key = `${s.width}x${s.height}`;
+        if (!resolutionMap.has(key)) {
+            resolutionMap.set(key, s);
         } else {
-            const existing = uniqueMap.get(s.url);
-            // Prefer versions with full resolution data
-            if (s.width && s.height && (!existing.width || !existing.height)) {
-                uniqueMap.set(s.url, s);
+            // If duplicate resolution, prefer the one with the cleaner label or higher quality tag
+            if (s.label === 'HD' && resolutionMap.get(key).label !== 'HD') {
+                resolutionMap.set(key, s);
             }
         }
     });
 
-    let finalSources = Array.from(uniqueMap.values());
+    let finalSources = Array.from(resolutionMap.values());
     finalSources.sort((a, b) => b.height - a.height);
 
     if (finalSources.length === 0) {
@@ -121,7 +121,7 @@ async function handleVideoDownload(video) {
     }
 
     if (finalSources.length === 1) {
-        downloadFile(finalSources[0].url, `fsnap-video-${finalSources[0].height}p.mp4`);
+        downloadFile(finalSources[0].url, `fsnap-video-${finalSources[0].height || 'media'}.mp4`);
     } else {
         showQualityChooser(finalSources);
     }
@@ -158,23 +158,34 @@ async function bruteForceSearch() {
 function extractAdvanced(text, list) {
     if (!text) return;
 
-    const keys = [
+    const urlKeys = [
         'browser_native_hd_url', 'playable_url_quality_hd', 'hd_src', 'hd_src_no_ratelimit',
         'browser_native_sd_url', 'playable_url', 'sd_src', 'sd_src_no_ratelimit'
     ];
 
-    keys.forEach(key => {
+    urlKeys.forEach(key => {
         const regex = new RegExp(`"${key}":"(https:[^"]+)"`, 'g');
         let match;
         while ((match = regex.exec(text)) !== null) {
             const url = sanitize(match[1]);
             if (url.includes('fbcdn.net') && !list.some(x => x.url === url)) {
-                const area = text.substring(Math.max(0, match.index - 500), match.index + 500);
-                const hMatch = area.match(/"height":(\d+)/) || area.match(/"height\\":(\d+)/);
-                const wMatch = area.match(/"width":(\d+)/) || area.match(/"width\\":(\d+)/);
+                // Search in a larger window for dimensions (800 chars)
+                const area = text.substring(Math.max(0, match.index - 800), match.index + 800);
 
-                const height = hMatch ? parseInt(hMatch[1]) : (key.includes('hd') ? 720 : 360);
-                const width = wMatch ? parseInt(wMatch[1]) : (height ? Math.round(height * (16 / 9)) : 0);
+                // More comprehensive resolution keys
+                const hMatch = area.match(/"height":(\d+)/) || area.match(/"height\\":(\d+)/) || area.match(/"pixel_height":(\d+)/) || area.match(/"frame_height":(\d+)/);
+                const wMatch = area.match(/"width":(\d+)/) || area.match(/"width\\":(\d+)/) || area.match(/"pixel_width":(\d+)/) || area.match(/"frame_width":(\d+)/);
+
+                let height = hMatch ? parseInt(hMatch[1]) : 0;
+                let width = wMatch ? parseInt(wMatch[1]) : 0;
+
+                // Fallback dimensions if metadata is missing but we know it's HD or SD
+                if (!height) {
+                    if (key.includes('hd')) { height = 720; width = 1280; }
+                    else { height = 360; width = 640; }
+                } else if (!width) {
+                    width = Math.round(height * (16 / 9));
+                }
 
                 list.push({
                     label: height >= 720 ? 'HD' : 'SD',
@@ -185,12 +196,13 @@ function extractAdvanced(text, list) {
         }
     });
 
+    // Final fallback for raw .mp4 URLs without explicit quality keys
     const mp4Match = text.match(/"(https:[^"]+?\.mp4[^"]+?)"/g);
     if (mp4Match) {
         mp4Match.forEach(m => {
             const url = sanitize(m.replace(/"/g, ''));
             if (url.includes('fbcdn') && !list.some(x => x.url === url)) {
-                list.push({ label: 'SD', width: 0, height: 0, url });
+                list.push({ label: 'SD', width: 640, height: 360, url });
             }
         });
     }
@@ -270,13 +282,13 @@ function showQualityChooser(sources) {
         textPart.style.display = "flex"; textPart.style.flexDirection = "column"; textPart.style.alignItems = "start";
 
         const mainText = document.createElement("span");
-        // NEW FORMAT: [Quality] Quality ([Width] x [Height])
-        const resText = (src.width && src.height) ? ` (${src.width} x ${src.height})` : "";
+        // RESOLUTION FORMAT: SD Quality (1024 x 768)
+        const resText = ` (${src.width} x ${src.height})`;
         mainText.textContent = `${src.label} Quality${resText}`;
         mainText.style.fontWeight = "600"; mainText.style.fontSize = "16px"; mainText.style.color = "#050505";
 
         const subText = document.createElement("span");
-        subText.textContent = `High Quality Video • Includes Audio`;
+        subText.textContent = `Premium Video Source • Includes Audio`;
         subText.style.fontSize = "12px"; subText.style.color = "#65676b";
 
         textPart.appendChild(mainText); textPart.appendChild(subText);
@@ -287,7 +299,7 @@ function showQualityChooser(sources) {
         btn.appendChild(textPart); btn.appendChild(iconPart);
         btn.onmouseenter = () => btn.style.background = "#e4e6eb";
         btn.onmouseleave = () => btn.style.background = "#f0f2f5";
-        btn.onclick = () => { downloadFile(src.url, `fsnap-video-${src.height || 'media'}.mp4`); closePopup(overlay, modal); };
+        btn.onclick = () => { downloadFile(src.url, `fsnap-video-${src.height}.mp4`); closePopup(overlay, modal); };
         scrollArea.appendChild(btn);
     });
 

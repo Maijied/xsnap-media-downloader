@@ -1,4 +1,4 @@
-// FSnap - Facebook Media Downloader Content Script (v1.1.4 - Multi-Version Fix)
+// FSnap - Facebook Media Downloader Content Script (v1.1.5 - Strict ID Fix)
 
 const observer = new MutationObserver(() => {
     clearTimeout(window.fsnapTimeout);
@@ -91,22 +91,27 @@ async function handleImageDownload(img) {
 
 async function handleVideoDownload(video) {
     toast("Hunting for videos...");
+    const videoId = findVideoId(video);
+
+    if (!videoId) {
+        toast("Could not identify video. Trying fallback...");
+    }
 
     let allSources = [];
-    const s1 = await huntForVideoSources(video);
-    const s2 = await deepPageSearch();
-    const s3 = await bruteForceSearch();
+    const s1 = await huntForVideoSources(video, videoId);
+    const s2 = await deepPageSearch(videoId);
+    const s3 = await bruteForceSearch(videoId);
     allSources = [...s1, ...s2, ...s3];
 
-    // --- RELAXED DEDUPLICATION (By URL Only) ---
+    // --- STRICT DEDUPLICATION BY URL ---
     const urlMap = new Map();
     allSources.forEach(s => {
         if (!urlMap.has(s.url)) {
             urlMap.set(s.url, s);
         } else {
             const existing = urlMap.get(s.url);
-            // Better metadata if URL matches
-            if (s.height > existing.height) urlMap.set(s.url, s);
+            // Prefer version with dimensions
+            if (s.width && s.height && (!existing.width || !existing.height)) urlMap.set(s.url, s);
         }
     });
 
@@ -118,7 +123,6 @@ async function handleVideoDownload(video) {
         return;
     }
 
-    // MULTI-VERSION UI TRIGGER
     if (finalSources.length > 1) {
         showQualityChooser(finalSources);
     } else {
@@ -126,35 +130,38 @@ async function handleVideoDownload(video) {
     }
 }
 
-async function huntForVideoSources(video) {
+async function huntForVideoSources(video, videoId) {
     const found = [];
-    const videoId = findVideoId(video);
     const scripts = Array.from(document.querySelectorAll('script'));
     for (const script of scripts) {
         const text = script.textContent;
         if (text && videoId && text.includes(videoId)) {
             const index = text.indexOf(videoId);
-            const chunk = text.substring(Math.max(0, index - 15000), index + 50000);
-            extractAdvanced(chunk, found);
+            // Scan 100k window for full metadata blocks
+            const chunk = text.substring(Math.max(0, index - 50000), index + 50000);
+            extractWithId(chunk, videoId, found);
         }
     }
     return found;
 }
 
-async function deepPageSearch() {
+async function deepPageSearch(videoId) {
     const found = [];
     const scripts = Array.from(document.querySelectorAll('script'));
-    scripts.forEach(s => { if (s.textContent) extractAdvanced(s.textContent, found); });
+    scripts.forEach(s => { if (s.textContent) extractWithId(s.textContent, videoId, found); });
     return found;
 }
 
-async function bruteForceSearch() {
+async function bruteForceSearch(videoId) {
     const found = [];
-    extractAdvanced(document.documentElement.innerHTML, found);
+    extractWithId(document.documentElement.innerHTML, videoId, found);
     return found;
 }
 
-function extractAdvanced(text, list) {
+/**
+ * STRICT EXTRACTION: Only collects sources if the Video ID is found within a small window of the URL.
+ */
+function extractWithId(text, targetId, list) {
     if (!text) return;
 
     const urlKeys = [
@@ -168,6 +175,11 @@ function extractAdvanced(text, list) {
         while ((match = regex.exec(text)) !== null) {
             const url = sanitize(match[1]);
             if (url.includes('fbcdn.net')) {
+                // Determine if this URL belongs to the target ID
+                // We check 2000 chars before/after for the ID. This blocks sources from other reels.
+                const checkArea = text.substring(Math.max(0, match.index - 2000), match.index + 2000);
+                if (targetId && !checkArea.includes(targetId)) continue;
+
                 const area = text.substring(Math.max(0, match.index - 800), match.index + 800);
                 const hMatch = area.match(/"height":(\d+)/) || area.match(/"height\\":(\d+)/) || area.match(/"pixel_height":(\d+)/) || area.match(/"frame_height":(\d+)/);
                 const wMatch = area.match(/"width":(\d+)/) || area.match(/"width\\":(\d+)/) || area.match(/"pixel_width":(\d+)/) || area.match(/"frame_width":(\d+)/);
@@ -189,26 +201,29 @@ function extractAdvanced(text, list) {
         }
     });
 
-    const mp4Match = text.match(/"(https:[^"]+?\.mp4[^"]+?)"/g);
-    if (mp4Match) {
-        mp4Match.forEach(m => {
-            const url = sanitize(m.replace(/"/g, ''));
-            if (url.includes('fbcdn') && !list.some(x => x.url === url)) {
-                list.push({ label: 'SD', width: 640, height: 360, url });
-            }
-        });
+    // Fallback for raw .mp4 ONLY if ID is very close (ensure it's not a background reel)
+    const mp4Regex = /"(https:[^"]+?\.mp4[^"]+?)"/g;
+    let mp4m;
+    while ((mp4m = mp4Regex.exec(text)) !== null) {
+        const url = sanitize(mp4m[1]);
+        const checkArea = text.substring(Math.max(0, mp4m.index - 500), mp4m.index + 500);
+        if (targetId && checkArea.includes(targetId) && !list.some(x => x.url === url)) {
+            list.push({ label: 'SD', width: 640, height: 360, url });
+        }
     }
 }
 
 function sanitize(url) { return url.replace(/\\/g, '').replace(/&amp;/g, '&'); }
 
 function findVideoId(video) {
+    // Priority 1: Data attributes on current or ancestors
     let curr = video;
     while (curr && curr !== document.body) {
         const id = curr.getAttribute('data-video-id') || curr.getAttribute('id')?.replace('v_', '') || curr.getAttribute('data-id');
         if (id && /^\d+$/.test(id)) return id;
         curr = curr.parentElement;
     }
+    // Priority 2: URL detection
     const urlMatch = window.location.href.match(/\/(?:videos|reels|watch|shorts|reel)\/(\d+)/);
     return urlMatch ? urlMatch[1] : null;
 }
@@ -234,7 +249,7 @@ function showQualityChooser(sources) {
     const modal = document.createElement("div");
     modal.className = "fsnap-chooser-modal";
     Object.assign(modal.style, {
-        background: "#fff", width: "420px", maxWidth: "95%", borderRadius: "8px",
+        background: "#fff", width: "420px", maxWidth: "95%", borderRadius: "12px",
         boxShadow: "0 12px 28px rgba(0,0,0,0.2), 0 2px 4px rgba(0,0,0,0.1)",
         display: "flex", flexDirection: "column", overflow: "hidden",
         fontFamily: "Segoe UI, Roboto, Helvetica, Arial, sans-serif",
@@ -262,7 +277,6 @@ function showQualityChooser(sources) {
     scrollArea.style.maxHeight = "450px"; scrollArea.style.overflowY = "auto"; scrollArea.style.padding = "16px";
     scrollArea.style.display = "flex"; scrollArea.style.flexDirection = "column"; scrollArea.style.gap = "8px";
 
-    // Counter for unique variants of same resolution
     const resCounts = {};
 
     sources.forEach((src) => {
@@ -277,13 +291,10 @@ function showQualityChooser(sources) {
         textPart.style.display = "flex"; textPart.style.flexDirection = "column"; textPart.style.alignItems = "start";
 
         const mainText = document.createElement("span");
-
-        // Count variants
         const resKey = `${src.width}x${src.height}`;
         resCounts[resKey] = (resCounts[resKey] || 0) + 1;
         const variantSuffix = sources.filter(x => `${x.width}x${x.height}` === resKey).length > 1 ? ` #${resCounts[resKey]}` : "";
 
-        // FORMAT: Quality (Width x Height) #Number
         mainText.textContent = `${src.label} Quality (${src.width} x ${src.height})${variantSuffix}`;
         mainText.style.fontWeight = "600"; mainText.style.fontSize = "16px"; mainText.style.color = "#050505";
 

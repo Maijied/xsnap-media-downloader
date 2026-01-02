@@ -1,0 +1,36 @@
+{
+    "manifest_version": 3,
+    "name": "FSnap - Media Downloader for Facebook",
+    "version": "1.0.0",
+    "description": "Download videos and images from Facebook in high resolution with one click.",
+    "author": "Maizied Hasan Majumder",
+    "icons": {
+        "48": "icons/icon-48.png",
+        "96": "icons/icon-96.png",
+        "128": "icons/icon-128.png"
+    },
+    "permissions": [
+        "downloads",
+        "storage"
+    ],
+    "host_permissions": [
+        "https://*.facebook.com/*",
+        "https://*.fb.watch/*",
+        "https://*.fbcdn.net/*"
+    ],
+    "background": {
+        "service_worker": "background.js"
+    },
+    "content_scripts": [
+        {
+            "matches": [
+                "https://*.facebook.com/*",
+                "https://fb.watch/*"
+            ],
+            "js": [
+                "content-script.js"
+            ],
+            "run_at": "document_idle"
+        }
+    ]
+}

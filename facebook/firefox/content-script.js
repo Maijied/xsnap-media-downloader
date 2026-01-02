@@ -1,4 +1,4 @@
-// FSnap - Facebook Media Downloader Content Script (v1.1.9 - Robust Search Fix)
+// FSnap - Facebook Media Downloader Content Script (v1.1.10 - High-Res Priority)
 
 const observer = new MutationObserver(() => {
     clearTimeout(window.fsnapTimeout);
@@ -90,77 +90,53 @@ async function handleImageDownload(img) {
 }
 
 async function handleVideoDownload(video) {
-    toast("Hunting for videos...");
+    toast("Hunting for high-quality video...");
     const videoId = findVideoId(video);
 
     let allSources = [];
     const scripts = Array.from(document.querySelectorAll('script'));
     for (const script of scripts) {
         const text = script.textContent;
-        if (text) {
-            if (videoId && text.includes(videoId)) {
-                let pos = text.indexOf(videoId);
-                while (pos !== -1) {
-                    // TRUST ZONE: 20k window for reliability on complex pages
-                    const chunk = text.substring(Math.max(0, pos - 10000), pos + 10000);
-                    extractVerified(chunk, videoId, allSources);
-                    pos = text.indexOf(videoId, pos + 1);
-                }
+        if (text && videoId && text.includes(videoId)) {
+            let pos = text.indexOf(videoId);
+            while (pos !== -1) {
+                const chunk = text.substring(Math.max(0, pos - 15000), pos + 15000);
+                extractVerified(chunk, videoId, allSources);
+                pos = text.indexOf(videoId, pos + 1);
             }
         }
     }
 
-    // FALLBACK 1: Search whole document with ID strictly
     if (allSources.length === 0 && videoId) {
         extractVerified(document.documentElement.innerHTML, videoId, allSources);
     }
-
-    // FALLBACK 2: If still nothing, search without ID (but only if we found an ID previously or it's a direct link)
     if (allSources.length === 0) {
         extractVerified(document.documentElement.innerHTML, null, allSources);
     }
 
     const uniqueMap = new Map();
     allSources.forEach(s => {
-        const key = s.url;
-        if (!uniqueMap.has(key)) {
-            uniqueMap.set(key, s);
-        }
+        if (!uniqueMap.has(s.url)) uniqueMap.set(s.url, s);
     });
 
     let finalSources = Array.from(uniqueMap.values());
+    // STRICT SORTING: Highest resolution first
     finalSources.sort((a, b) => b.height - a.height);
 
-    // UI Deduplication by resolution
-    const resMap = new Map();
-    const result = [];
-    finalSources.forEach(s => {
-        const resKey = `${s.label}-${s.width}x${s.height}`;
-        if (!resMap.has(resKey)) {
-            resMap.set(resKey, true);
-            result.push(s);
-        }
-    });
-
-    if (result.length === 0) {
-        toast("Video not found. Try playing it first or refreshing.");
+    if (finalSources.length === 0) {
+        toast("Video not found. Try playing it first.");
         return;
     }
 
-    if (result.length > 1) {
-        showQualityChooser(result);
-    } else {
-        downloadFile(result[0].url, `fsnap-video-${result[0].height || 'media'}.mp4`);
-    }
+    // ALWAYS DOWNLOAD HIGHEST RESOLUTION DIRECTLY
+    const best = finalSources[0];
+    toast(`Downloading ${best.label} (${best.width}x${best.height})...`);
+    downloadFile(best.url, `fsnap-video-${best.height}.mp4`);
 }
 
 function extractVerified(text, targetId, list) {
     if (!text) return;
-
-    const urlKeys = [
-        'browser_native_hd_url', 'playable_url_quality_hd', 'hd_src', 'hd_src_no_ratelimit',
-        'browser_native_sd_url', 'playable_url', 'sd_src', 'sd_src_no_ratelimit'
-    ];
+    const urlKeys = ['browser_native_hd_url', 'playable_url_quality_hd', 'hd_src', 'hd_src_no_ratelimit', 'browser_native_sd_url', 'playable_url', 'sd_src', 'sd_src_no_ratelimit'];
 
     urlKeys.forEach(key => {
         const regex = new RegExp(`"${key}":"(https:[^"]+)"`, 'g');
@@ -168,7 +144,6 @@ function extractVerified(text, targetId, list) {
         while ((match = regex.exec(text)) !== null) {
             const url = sanitize(match[1]);
             if (url.includes('fbcdn.net')) {
-                // If ID is provided, it must be within a 5000 char radius (relaxed from 1200)
                 const proximityCheck = text.substring(Math.max(0, match.index - 5000), match.index + 5000);
                 if (targetId && !proximityCheck.includes(targetId)) continue;
 
@@ -223,95 +198,6 @@ function findVideoId(video) {
 function downloadFile(url, filename) {
     const api = typeof browser !== 'undefined' ? browser : chrome;
     api.runtime.sendMessage({ action: "DOWNLOAD_MEDIA", url, filename });
-    toast("Download started!");
-}
-
-function showQualityChooser(sources) {
-    const existing = document.querySelector(".fsnap-chooser-overlay");
-    if (existing) existing.remove();
-
-    const overlay = document.createElement("div");
-    overlay.className = "fsnap-chooser-overlay";
-    Object.assign(overlay.style, {
-        position: "fixed", top: 0, left: 0, width: "100%", height: "100%",
-        background: "rgba(0,0,0,0.6)", zIndex: 2147483646, display: "flex", alignItems: "center", justifyContent: "center",
-        opacity: "0", transition: "opacity 0.2s"
-    });
-
-    const modal = document.createElement("div");
-    modal.className = "fsnap-chooser-modal";
-    Object.assign(modal.style, {
-        background: "#fff", width: "420px", maxWidth: "95%", borderRadius: "12px",
-        boxShadow: "0 12px 28px rgba(0,0,0,0.2), 0 2px 4px rgba(0,0,0,0.1)",
-        display: "flex", flexDirection: "column", overflow: "hidden",
-        fontFamily: "Segoe UI, Roboto, Helvetica, Arial, sans-serif",
-        transform: "scale(0.95)", transition: "transform 0.2s"
-    });
-
-    const header = document.createElement("div");
-    Object.assign(header.style, {
-        padding: "16px", borderBottom: "1px solid #ced0d4", display: "flex",
-        justifyContent: "space-between", alignItems: "center"
-    });
-
-    const title = document.createElement("span");
-    title.textContent = "Download Media";
-    title.style.fontSize = "20px"; title.style.fontWeight = "700"; title.style.color = "#050505";
-
-    const closeBtn = document.createElement("div");
-    closeBtn.innerHTML = `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M18 6L6 18M6 6L18 18" stroke="#65676b" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
-    closeBtn.style.cursor = "pointer"; closeBtn.style.padding = "4px"; closeBtn.style.borderRadius = "50%";
-    closeBtn.onclick = () => closePopup(overlay, modal);
-
-    header.appendChild(title); header.appendChild(closeBtn); modal.appendChild(header);
-
-    const scrollArea = document.createElement("div");
-    scrollArea.style.maxHeight = "450px"; scrollArea.style.overflowY = "auto"; scrollArea.style.padding = "16px";
-    scrollArea.style.display = "flex"; scrollArea.style.flexDirection = "column"; scrollArea.style.gap = "8px";
-
-    sources.forEach((src) => {
-        const btn = document.createElement("button");
-        Object.assign(btn.style, {
-            display: "flex", alignItems: "center", justifyContent: "space-between",
-            padding: "14px 18px", borderRadius: "8px", border: "none", background: "#f0f2f5",
-            cursor: "pointer", transition: "background 0.2s"
-        });
-
-        const textPart = document.createElement("div");
-        textPart.style.display = "flex"; textPart.style.flexDirection = "column"; textPart.style.alignItems = "start";
-
-        const mainText = document.createElement("span");
-        mainText.textContent = `${src.label} Quality (${src.width} x ${src.height})`;
-        mainText.style.fontWeight = "600"; mainText.style.fontSize = "16px"; mainText.style.color = "#050505";
-
-        const subText = document.createElement("span");
-        subText.textContent = `Premium Video Source • Includes Audio`;
-        subText.style.fontSize = "12px"; subText.style.color = "#65676b";
-
-        textPart.appendChild(mainText); textPart.appendChild(subText);
-
-        const iconPart = document.createElement("div");
-        iconPart.innerHTML = `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 3V15M12 15L8 11M12 15L16 11" stroke="#1877f2" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
-
-        btn.appendChild(textPart); btn.appendChild(iconPart);
-        btn.onmouseenter = () => btn.style.background = "#e4e6eb";
-        btn.onmouseleave = () => btn.style.background = "#f0f2f5";
-        btn.onclick = () => { downloadFile(src.url, `fsnap-video-${src.height}.mp4`); closePopup(overlay, modal); };
-        scrollArea.appendChild(btn);
-    });
-
-    modal.appendChild(scrollArea); overlay.appendChild(modal); document.body.appendChild(overlay);
-
-    requestAnimationFrame(() => {
-        overlay.style.opacity = "1";
-        modal.style.transform = "scale(1)";
-    });
-}
-
-function closePopup(overlay, modal) {
-    overlay.style.opacity = "0";
-    modal.style.transform = "scale(0.95)";
-    setTimeout(() => overlay.remove(), 200);
 }
 
 function toast(message) {

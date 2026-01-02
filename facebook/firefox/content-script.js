@@ -1,4 +1,4 @@
-// FSnap - Facebook Media Downloader Content Script (v1.1.5 - Strict ID Fix)
+// FSnap - Facebook Media Downloader Content Script (v1.1.6 - Ultra-Precise ID Fix)
 
 const observer = new MutationObserver(() => {
     clearTimeout(window.fsnapTimeout);
@@ -103,14 +103,13 @@ async function handleVideoDownload(video) {
     const s3 = await bruteForceSearch(videoId);
     allSources = [...s1, ...s2, ...s3];
 
-    // --- STRICT DEDUPLICATION BY URL ---
+    // Deduplicate by URL
     const urlMap = new Map();
     allSources.forEach(s => {
         if (!urlMap.has(s.url)) {
             urlMap.set(s.url, s);
         } else {
             const existing = urlMap.get(s.url);
-            // Prefer version with dimensions
             if (s.width && s.height && (!existing.width || !existing.height)) urlMap.set(s.url, s);
         }
     });
@@ -137,9 +136,8 @@ async function huntForVideoSources(video, videoId) {
         const text = script.textContent;
         if (text && videoId && text.includes(videoId)) {
             const index = text.indexOf(videoId);
-            // Scan 100k window for full metadata blocks
             const chunk = text.substring(Math.max(0, index - 50000), index + 50000);
-            extractWithId(chunk, videoId, found);
+            extractWithIdStrict(chunk, videoId, found);
         }
     }
     return found;
@@ -148,20 +146,20 @@ async function huntForVideoSources(video, videoId) {
 async function deepPageSearch(videoId) {
     const found = [];
     const scripts = Array.from(document.querySelectorAll('script'));
-    scripts.forEach(s => { if (s.textContent) extractWithId(s.textContent, videoId, found); });
+    scripts.forEach(s => { if (s.textContent) extractWithIdStrict(s.textContent, videoId, found); });
     return found;
 }
 
 async function bruteForceSearch(videoId) {
     const found = [];
-    extractWithId(document.documentElement.innerHTML, videoId, found);
+    extractWithIdStrict(document.documentElement.innerHTML, videoId, found);
     return found;
 }
 
 /**
- * STRICT EXTRACTION: Only collects sources if the Video ID is found within a small window of the URL.
+ * ULTRA-PRECISE EXTRACTION: Uses a very tight 800-char window to bind URLs to the specific Video ID.
  */
-function extractWithId(text, targetId, list) {
+function extractWithIdStrict(text, targetId, list) {
     if (!text) return;
 
     const urlKeys = [
@@ -175,14 +173,15 @@ function extractWithId(text, targetId, list) {
         while ((match = regex.exec(text)) !== null) {
             const url = sanitize(match[1]);
             if (url.includes('fbcdn.net')) {
-                // Determine if this URL belongs to the target ID
-                // We check 2000 chars before/after for the ID. This blocks sources from other reels.
-                const checkArea = text.substring(Math.max(0, match.index - 2000), match.index + 2000);
-                if (targetId && !checkArea.includes(targetId)) continue;
+                // TIGHT WINDOW: Only 800 chars around the URL to find the ID.
+                const checkArea = text.substring(Math.max(0, match.index - 800), match.index + 800);
 
-                const area = text.substring(Math.max(0, match.index - 800), match.index + 800);
-                const hMatch = area.match(/"height":(\d+)/) || area.match(/"height\\":(\d+)/) || area.match(/"pixel_height":(\d+)/) || area.match(/"frame_height":(\d+)/);
-                const wMatch = area.match(/"width":(\d+)/) || area.match(/"width\\":(\d+)/) || area.match(/"pixel_width":(\d+)/) || area.match(/"frame_width":(\d+)/);
+                // Structural ID check (must be a key-value or escaped version)
+                const idPattern = new RegExp(`"(?:video_id|id)":"${targetId}"|"(?:video_id|id)\\\\":"${targetId}"`);
+                if (targetId && !idPattern.test(checkArea)) continue;
+
+                const hMatch = checkArea.match(/"height":(\d+)/) || checkArea.match(/"height\\":(\d+)/) || checkArea.match(/"pixel_height":(\d+)/) || checkArea.match(/"frame_height":(\d+)/);
+                const wMatch = checkArea.match(/"width":(\d+)/) || checkArea.match(/"width\\":(\d+)/) || checkArea.match(/"pixel_width":(\d+)/) || checkArea.match(/"frame_width":(\d+)/);
 
                 let height = hMatch ? parseInt(hMatch[1]) : 0;
                 let width = wMatch ? parseInt(wMatch[1]) : 0;
@@ -201,12 +200,12 @@ function extractWithId(text, targetId, list) {
         }
     });
 
-    // Fallback for raw .mp4 ONLY if ID is very close (ensure it's not a background reel)
+    // Fallback for raw .mp4 with extremely tight 300-char ID check
     const mp4Regex = /"(https:[^"]+?\.mp4[^"]+?)"/g;
     let mp4m;
     while ((mp4m = mp4Regex.exec(text)) !== null) {
         const url = sanitize(mp4m[1]);
-        const checkArea = text.substring(Math.max(0, mp4m.index - 500), mp4m.index + 500);
+        const checkArea = text.substring(Math.max(0, mp4m.index - 300), mp4m.index + 300);
         if (targetId && checkArea.includes(targetId) && !list.some(x => x.url === url)) {
             list.push({ label: 'SD', width: 640, height: 360, url });
         }
@@ -216,14 +215,12 @@ function extractWithId(text, targetId, list) {
 function sanitize(url) { return url.replace(/\\/g, '').replace(/&amp;/g, '&'); }
 
 function findVideoId(video) {
-    // Priority 1: Data attributes on current or ancestors
     let curr = video;
     while (curr && curr !== document.body) {
         const id = curr.getAttribute('data-video-id') || curr.getAttribute('id')?.replace('v_', '') || curr.getAttribute('data-id');
         if (id && /^\d+$/.test(id)) return id;
         curr = curr.parentElement;
     }
-    // Priority 2: URL detection
     const urlMatch = window.location.href.match(/\/(?:videos|reels|watch|shorts|reel)\/(\d+)/);
     return urlMatch ? urlMatch[1] : null;
 }

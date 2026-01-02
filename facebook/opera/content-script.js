@@ -1,4 +1,4 @@
-// FSnap - Facebook Media Downloader Content Script (v1.1.1 - Resolution & Audio Fix)
+// FSnap - Facebook Media Downloader Content Script (v1.1.2 - Resolution Format Fix)
 
 const observer = new MutationObserver(() => {
     clearTimeout(window.fsnapTimeout);
@@ -98,26 +98,22 @@ async function handleVideoDownload(video) {
     const s3 = await bruteForceSearch();
     allSources = [...s1, ...s2, ...s3];
 
-    // --- ENHANCED FILTERING ---
-    // 1. Deduplicate by URL
+    // Deduplicate by URL
     const uniqueMap = new Map();
     allSources.forEach(s => {
         if (!uniqueMap.has(s.url)) {
             uniqueMap.set(s.url, s);
-        } else if (s.res > uniqueMap.get(s.url).res) {
-            uniqueMap.set(s.url, s); // Keep version with better resolution label
+        } else {
+            const existing = uniqueMap.get(s.url);
+            // Prefer versions with full resolution data
+            if (s.width && s.height && (!existing.width || !existing.height)) {
+                uniqueMap.set(s.url, s);
+            }
         }
     });
 
     let finalSources = Array.from(uniqueMap.values());
-
-    // 2. Filter out likely silent segments (DASH fragments usually have 'bytestart' or very specific params, 
-    // but the most reliable way is if they are explicitly mentioned as 'representations' without audio)
-    // However, for simplicity and user request, we prioritize sources found via 'playable_url' style keys 
-    // which almost always have audio.
-
-    // 3. Sort by resolution descending
-    finalSources.sort((a, b) => b.res - a.res);
+    finalSources.sort((a, b) => b.height - a.height);
 
     if (finalSources.length === 0) {
         toast("No complete videos found. Play the video and try again.");
@@ -125,7 +121,7 @@ async function handleVideoDownload(video) {
     }
 
     if (finalSources.length === 1) {
-        downloadFile(finalSources[0].url, `fsnap-video-${finalSources[0].label}.mp4`);
+        downloadFile(finalSources[0].url, `fsnap-video-${finalSources[0].height}p.mp4`);
     } else {
         showQualityChooser(finalSources);
     }
@@ -162,7 +158,6 @@ async function bruteForceSearch() {
 function extractAdvanced(text, list) {
     if (!text) return;
 
-    // We look for URL keys and then try to find resolution nearby
     const keys = [
         'browser_native_hd_url', 'playable_url_quality_hd', 'hd_src', 'hd_src_no_ratelimit',
         'browser_native_sd_url', 'playable_url', 'sd_src', 'sd_src_no_ratelimit'
@@ -174,28 +169,28 @@ function extractAdvanced(text, list) {
         while ((match = regex.exec(text)) !== null) {
             const url = sanitize(match[1]);
             if (url.includes('fbcdn.net') && !list.some(x => x.url === url)) {
-                // Try to find resolution in the surrounding 500 characters
                 const area = text.substring(Math.max(0, match.index - 500), match.index + 500);
-                const resMatch = area.match(/"height":(\d+)/) || area.match(/"height\\":(\d+)/);
-                const height = resMatch ? parseInt(resMatch[1]) : (key.includes('hd') ? 720 : 360);
+                const hMatch = area.match(/"height":(\d+)/) || area.match(/"height\\":(\d+)/);
+                const wMatch = area.match(/"width":(\d+)/) || area.match(/"width\\":(\d+)/);
+
+                const height = hMatch ? parseInt(hMatch[1]) : (key.includes('hd') ? 720 : 360);
+                const width = wMatch ? parseInt(wMatch[1]) : (height ? Math.round(height * (16 / 9)) : 0);
 
                 list.push({
                     label: height >= 720 ? 'HD' : 'SD',
-                    res: height,
-                    display: height ? `${height}p` : (key.includes('hd') ? 'HD' : 'SD'),
+                    width, height,
                     url
                 });
             }
         }
     });
 
-    // Special handling for cleaner MP4s that FB often hides
     const mp4Match = text.match(/"(https:[^"]+?\.mp4[^"]+?)"/g);
     if (mp4Match) {
         mp4Match.forEach(m => {
             const url = sanitize(m.replace(/"/g, ''));
             if (url.includes('fbcdn') && !list.some(x => x.url === url)) {
-                list.push({ label: 'SD', res: 0, display: 'Video', url });
+                list.push({ label: 'SD', width: 0, height: 0, url });
             }
         });
     }
@@ -235,8 +230,9 @@ function showQualityChooser(sources) {
     const modal = document.createElement("div");
     modal.className = "fsnap-chooser-modal";
     Object.assign(modal.style, {
-        background: "#fff", width: "400px", maxWidth: "95%", borderRadius: "8px",
-        boxShadow: "0 12px 28px rgba(0,0,0,0.2)", display: "flex", flexDirection: "column", overflow: "hidden",
+        background: "#fff", width: "420px", maxWidth: "95%", borderRadius: "8px",
+        boxShadow: "0 12px 28px rgba(0,0,0,0.2), 0 2px 4px rgba(0,0,0,0.1)",
+        display: "flex", flexDirection: "column", overflow: "hidden",
         fontFamily: "Segoe UI, Roboto, Helvetica, Arial, sans-serif",
         transform: "scale(0.95)", transition: "transform 0.2s"
     });
@@ -274,11 +270,13 @@ function showQualityChooser(sources) {
         textPart.style.display = "flex"; textPart.style.flexDirection = "column"; textPart.style.alignItems = "start";
 
         const mainText = document.createElement("span");
-        mainText.textContent = `${src.display} Video`;
+        // NEW FORMAT: [Quality] Quality ([Width] x [Height])
+        const resText = (src.width && src.height) ? ` (${src.width} x ${src.height})` : "";
+        mainText.textContent = `${src.label} Quality${resText}`;
         mainText.style.fontWeight = "600"; mainText.style.fontSize = "16px"; mainText.style.color = "#050505";
 
         const subText = document.createElement("span");
-        subText.textContent = `Includes Audio • ${src.label} Quality`;
+        subText.textContent = `High Quality Video • Includes Audio`;
         subText.style.fontSize = "12px"; subText.style.color = "#65676b";
 
         textPart.appendChild(mainText); textPart.appendChild(subText);
@@ -289,7 +287,7 @@ function showQualityChooser(sources) {
         btn.appendChild(textPart); btn.appendChild(iconPart);
         btn.onmouseenter = () => btn.style.background = "#e4e6eb";
         btn.onmouseleave = () => btn.style.background = "#f0f2f5";
-        btn.onclick = () => { downloadFile(src.url, `fsnap-video-${src.display}.mp4`); closePopup(overlay, modal); };
+        btn.onclick = () => { downloadFile(src.url, `fsnap-video-${src.height || 'media'}.mp4`); closePopup(overlay, modal); };
         scrollArea.appendChild(btn);
     });
 

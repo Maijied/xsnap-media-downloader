@@ -1,4 +1,4 @@
-// FSnap - Facebook Media Downloader Content Script (v1.1.3 - Robust Resolution Fix)
+// FSnap - Facebook Media Downloader Content Script (v1.1.4 - Multi-Version Fix)
 
 const observer = new MutationObserver(() => {
     clearTimeout(window.fsnapTimeout);
@@ -98,21 +98,19 @@ async function handleVideoDownload(video) {
     const s3 = await bruteForceSearch();
     allSources = [...s1, ...s2, ...s3];
 
-    // --- STRICT DEDUPLICATION BY RESOLUTION ---
-    const resolutionMap = new Map();
+    // --- RELAXED DEDUPLICATION (By URL Only) ---
+    const urlMap = new Map();
     allSources.forEach(s => {
-        const key = `${s.width}x${s.height}`;
-        if (!resolutionMap.has(key)) {
-            resolutionMap.set(key, s);
+        if (!urlMap.has(s.url)) {
+            urlMap.set(s.url, s);
         } else {
-            // If duplicate resolution, prefer the one with the cleaner label or higher quality tag
-            if (s.label === 'HD' && resolutionMap.get(key).label !== 'HD') {
-                resolutionMap.set(key, s);
-            }
+            const existing = urlMap.get(s.url);
+            // Better metadata if URL matches
+            if (s.height > existing.height) urlMap.set(s.url, s);
         }
     });
 
-    let finalSources = Array.from(resolutionMap.values());
+    let finalSources = Array.from(urlMap.values());
     finalSources.sort((a, b) => b.height - a.height);
 
     if (finalSources.length === 0) {
@@ -120,10 +118,11 @@ async function handleVideoDownload(video) {
         return;
     }
 
-    if (finalSources.length === 1) {
-        downloadFile(finalSources[0].url, `fsnap-video-${finalSources[0].height || 'media'}.mp4`);
-    } else {
+    // MULTI-VERSION UI TRIGGER
+    if (finalSources.length > 1) {
         showQualityChooser(finalSources);
+    } else {
+        downloadFile(finalSources[0].url, `fsnap-video-${finalSources[0].height || 'media'}.mp4`);
     }
 }
 
@@ -168,18 +167,14 @@ function extractAdvanced(text, list) {
         let match;
         while ((match = regex.exec(text)) !== null) {
             const url = sanitize(match[1]);
-            if (url.includes('fbcdn.net') && !list.some(x => x.url === url)) {
-                // Search in a larger window for dimensions (800 chars)
+            if (url.includes('fbcdn.net')) {
                 const area = text.substring(Math.max(0, match.index - 800), match.index + 800);
-
-                // More comprehensive resolution keys
                 const hMatch = area.match(/"height":(\d+)/) || area.match(/"height\\":(\d+)/) || area.match(/"pixel_height":(\d+)/) || area.match(/"frame_height":(\d+)/);
                 const wMatch = area.match(/"width":(\d+)/) || area.match(/"width\\":(\d+)/) || area.match(/"pixel_width":(\d+)/) || area.match(/"frame_width":(\d+)/);
 
                 let height = hMatch ? parseInt(hMatch[1]) : 0;
                 let width = wMatch ? parseInt(wMatch[1]) : 0;
 
-                // Fallback dimensions if metadata is missing but we know it's HD or SD
                 if (!height) {
                     if (key.includes('hd')) { height = 720; width = 1280; }
                     else { height = 360; width = 640; }
@@ -187,16 +182,13 @@ function extractAdvanced(text, list) {
                     width = Math.round(height * (16 / 9));
                 }
 
-                list.push({
-                    label: height >= 720 ? 'HD' : 'SD',
-                    width, height,
-                    url
-                });
+                if (!list.some(x => x.url === url)) {
+                    list.push({ label: height >= 720 ? 'HD' : 'SD', width, height, url });
+                }
             }
         }
     });
 
-    // Final fallback for raw .mp4 URLs without explicit quality keys
     const mp4Match = text.match(/"(https:[^"]+?\.mp4[^"]+?)"/g);
     if (mp4Match) {
         mp4Match.forEach(m => {
@@ -270,6 +262,9 @@ function showQualityChooser(sources) {
     scrollArea.style.maxHeight = "450px"; scrollArea.style.overflowY = "auto"; scrollArea.style.padding = "16px";
     scrollArea.style.display = "flex"; scrollArea.style.flexDirection = "column"; scrollArea.style.gap = "8px";
 
+    // Counter for unique variants of same resolution
+    const resCounts = {};
+
     sources.forEach((src) => {
         const btn = document.createElement("button");
         Object.assign(btn.style, {
@@ -282,9 +277,14 @@ function showQualityChooser(sources) {
         textPart.style.display = "flex"; textPart.style.flexDirection = "column"; textPart.style.alignItems = "start";
 
         const mainText = document.createElement("span");
-        // RESOLUTION FORMAT: SD Quality (1024 x 768)
-        const resText = ` (${src.width} x ${src.height})`;
-        mainText.textContent = `${src.label} Quality${resText}`;
+
+        // Count variants
+        const resKey = `${src.width}x${src.height}`;
+        resCounts[resKey] = (resCounts[resKey] || 0) + 1;
+        const variantSuffix = sources.filter(x => `${x.width}x${x.height}` === resKey).length > 1 ? ` #${resCounts[resKey]}` : "";
+
+        // FORMAT: Quality (Width x Height) #Number
+        mainText.textContent = `${src.label} Quality (${src.width} x ${src.height})${variantSuffix}`;
         mainText.style.fontWeight = "600"; mainText.style.fontSize = "16px"; mainText.style.color = "#050505";
 
         const subText = document.createElement("span");

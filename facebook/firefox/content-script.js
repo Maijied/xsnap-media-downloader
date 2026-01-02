@@ -1,4 +1,4 @@
-// FSnap - Facebook Media Downloader Content Script (v1.1.8 - Precision Overhaul)
+// FSnap - Facebook Media Downloader Content Script (v1.1.9 - Robust Search Fix)
 
 const observer = new MutationObserver(() => {
     clearTimeout(window.fsnapTimeout);
@@ -93,36 +93,35 @@ async function handleVideoDownload(video) {
     toast("Hunting for videos...");
     const videoId = findVideoId(video);
 
-    if (!videoId) {
-        toast("Could not identify video. Trying fallback...");
-    }
-
     let allSources = [];
     const scripts = Array.from(document.querySelectorAll('script'));
     for (const script of scripts) {
         const text = script.textContent;
-        if (text && videoId && text.includes(videoId)) {
-            // Find all Occurrences of the Video ID to scan around them
-            let pos = text.indexOf(videoId);
-            while (pos !== -1) {
-                // Trust Zone: 10,000 characters around EACH occurrence of the ID
-                const chunk = text.substring(Math.max(0, pos - 5000), pos + 5000);
-                extractVerified(chunk, videoId, allSources);
-                pos = text.indexOf(videoId, pos + 1);
+        if (text) {
+            if (videoId && text.includes(videoId)) {
+                let pos = text.indexOf(videoId);
+                while (pos !== -1) {
+                    // TRUST ZONE: 20k window for reliability on complex pages
+                    const chunk = text.substring(Math.max(0, pos - 10000), pos + 10000);
+                    extractVerified(chunk, videoId, allSources);
+                    pos = text.indexOf(videoId, pos + 1);
+                }
             }
         }
     }
 
-    // Fallback: search whole page strictly
-    if (allSources.length === 0) {
+    // FALLBACK 1: Search whole document with ID strictly
+    if (allSources.length === 0 && videoId) {
         extractVerified(document.documentElement.innerHTML, videoId, allSources);
     }
 
-    // --- DECISIVE DEDUPLICATION ---
-    // Rule: One URL per unique resolution/quality combination.
+    // FALLBACK 2: If still nothing, search without ID (but only if we found an ID previously or it's a direct link)
+    if (allSources.length === 0) {
+        extractVerified(document.documentElement.innerHTML, null, allSources);
+    }
+
     const uniqueMap = new Map();
     allSources.forEach(s => {
-        // Key is based on URL AND Resolution to ensure we don't skip actual variants
         const key = s.url;
         if (!uniqueMap.has(key)) {
             uniqueMap.set(key, s);
@@ -130,11 +129,9 @@ async function handleVideoDownload(video) {
     });
 
     let finalSources = Array.from(uniqueMap.values());
-
-    // Sort by height descending
     finalSources.sort((a, b) => b.height - a.height);
 
-    // Final UI-level filter: if we have multiple "640x360" entries, only keep the first one
+    // UI Deduplication by resolution
     const resMap = new Map();
     const result = [];
     finalSources.forEach(s => {
@@ -146,7 +143,7 @@ async function handleVideoDownload(video) {
     });
 
     if (result.length === 0) {
-        toast("No complete videos found. Play the video and try again.");
+        toast("Video not found. Try playing it first or refreshing.");
         return;
     }
 
@@ -157,9 +154,6 @@ async function handleVideoDownload(video) {
     }
 }
 
-/**
- * VERIFIED EXTRACTION: Scans a segment and ensures URLs are tied to the Video ID.
- */
 function extractVerified(text, targetId, list) {
     if (!text) return;
 
@@ -174,19 +168,16 @@ function extractVerified(text, targetId, list) {
         while ((match = regex.exec(text)) !== null) {
             const url = sanitize(match[1]);
             if (url.includes('fbcdn.net')) {
-                // PROXIMITY CHECK: ID must be within 1200 characters of the URL
-                const proximityCheck = text.substring(Math.max(0, match.index - 1200), match.index + 1200);
+                // If ID is provided, it must be within a 5000 char radius (relaxed from 1200)
+                const proximityCheck = text.substring(Math.max(0, match.index - 5000), match.index + 5000);
                 if (targetId && !proximityCheck.includes(targetId)) continue;
 
-                // RESOLUTION SEARCH
-                const area = text.substring(Math.max(0, match.index - 800), match.index + 800);
+                const area = text.substring(Math.max(0, match.index - 1000), match.index + 1000);
                 const hMatch = area.match(/"height":(\d+)/) || area.match(/"height\\":(\d+)/) || area.match(/"pixel_height":(\d+)/) || area.match(/"frame_height":(\d+)/);
                 const wMatch = area.match(/"width":(\d+)/) || area.match(/"width\\":(\d+)/) || area.match(/"pixel_width":(\d+)/) || area.match(/"frame_width":(\d+)/);
 
                 let height = hMatch ? parseInt(hMatch[1]) : 0;
                 let width = wMatch ? parseInt(wMatch[1]) : 0;
-
-                // Determine Quality Label
                 let label = height >= 720 ? 'HD' : 'SD';
                 if (key.includes('hd')) label = 'HD';
 
@@ -204,13 +195,13 @@ function extractVerified(text, targetId, list) {
         }
     });
 
-    // Fallback for MP4 links with tighter 600-char ID proximity
     const mp4Regex = /"(https:[^"]+?\.mp4[^"]+?)"/g;
     let mp4m;
     while ((mp4m = mp4Regex.exec(text)) !== null) {
         const url = sanitize(mp4m[1]);
-        const proximity = text.substring(Math.max(0, mp4m.index - 600), mp4m.index + 600);
-        if (targetId && proximity.includes(targetId) && !list.some(x => x.url === url)) {
+        const proximity = text.substring(Math.max(0, mp4m.index - 2000), mp4m.index + 2000);
+        if (targetId && !proximity.includes(targetId)) continue;
+        if (url.includes('fbcdn') && !list.some(x => x.url === url)) {
             list.push({ label: 'SD', width: 640, height: 360, url });
         }
     }
@@ -221,7 +212,7 @@ function sanitize(url) { return url.replace(/\\/g, '').replace(/&amp;/g, '&'); }
 function findVideoId(video) {
     let curr = video;
     while (curr && curr !== document.body) {
-        const id = curr.getAttribute('data-video-id') || curr.getAttribute('id')?.replace('v_', '') || curr.getAttribute('data-id');
+        const id = curr.getAttribute('data-video-id') || curr.getAttribute('id')?.replace('v_', '') || curr.getAttribute('data-id') || curr.getAttribute('data-fbid');
         if (id && /^\d+$/.test(id)) return id;
         curr = curr.parentElement;
     }

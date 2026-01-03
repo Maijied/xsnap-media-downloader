@@ -1,4 +1,4 @@
-// FSnap - Facebook Media Downloader Content Script (v1.1.11 - High-Res Priority)
+// FSnap - Facebook Media Downloader Content Script (v1.1.12 - High-Res Priority)
 
 const observer = new MutationObserver(() => {
     clearTimeout(window.fsnapTimeout);
@@ -90,55 +90,51 @@ async function handleImageDownload(img) {
 }
 
 async function handleVideoDownload(video) {
-    toast("🔍 Hunting for high-quality video...");
+    toast("🔍 Searching for high-quality video...");
     const videoId = findVideoId(video);
-    console.log("FSnap: Found Video ID:", videoId);
+    console.log("FSnap: Video ID:", videoId);
 
     let allSources = [];
-    const scripts = Array.from(document.querySelectorAll('script'));
+    const scriptElements = Array.from(document.querySelectorAll('script'));
 
-    // First pass: look in scripts with ID filter
-    for (const script of scripts) {
-        const text = script.textContent;
+    // First pass: look for specific combined-media keys (highest reliability)
+    for (const s of scriptElements) {
+        const text = s.textContent;
         if (text && videoId && text.includes(videoId)) {
-            let pos = text.indexOf(videoId);
-            while (pos !== -1) {
-                const chunk = text.substring(Math.max(0, pos - 20000), pos + 20000);
-                extractVerified(chunk, videoId, allSources);
-                pos = text.indexOf(videoId, pos + 1);
-            }
+            extractVerified(text, videoId, allSources, true); // Strict mode: verified keys first
         }
     }
 
-    // Second pass: if nothing found, try looking in all scripts without strict ID match (fallback)
+    // Second pass: general search if needed
     if (allSources.length === 0) {
-        scripts.forEach(s => {
-            if (s.textContent && (s.textContent.includes('fbcdn.net') || s.textContent.includes('playable_url'))) {
-                extractVerified(s.textContent, null, allSources);
-            }
-        });
+        for (const s of scriptElements) {
+            extractVerified(s.textContent, videoId, allSources, false);
+        }
     }
 
-    // Third pass: check page HTML
+    // Third pass: fallback to full document
     if (allSources.length === 0) {
-        extractVerified(document.documentElement.innerHTML, videoId, allSources);
-    }
-    if (allSources.length === 0) {
-        extractVerified(document.documentElement.innerHTML, null, allSources);
+        extractVerified(document.documentElement.innerHTML, videoId, allSources, false);
+        extractVerified(document.documentElement.innerHTML, null, allSources, false);
     }
 
-    // Deduplicate and filter
+    // Deduplicate and filter out likely audio tracks
     const uniqueMap = new Map();
     allSources.forEach(s => {
+        const urlLower = s.url.toLowerCase();
+        // Skip obvious audio-only chunks/tracks unless it's our only hope
+        if (urlLower.includes('audio') || urlLower.includes('_a.mp4') || urlLower.includes('bytestart')) {
+            if (allSources.length > 1) return;
+        }
         if (!uniqueMap.has(s.url)) uniqueMap.set(s.url, s);
     });
 
     let finalSources = Array.from(uniqueMap.values());
 
-    // SMART SORTING: Highest resolution first
+    // SMART SORTING: Highest resolution first, prefer labels
     finalSources.sort((a, b) => {
-        const scoreA = (a.height || 0) * (a.width || 0) + (a.label === 'HD' ? 1000000 : 0);
-        const scoreB = (b.height || 0) * (b.width || 0) + (b.label === 'HD' ? 1000000 : 0);
+        const scoreA = (a.height || 0) * (a.width || 0) + (a.label.includes('HD') ? 1000000 : 0);
+        const scoreB = (b.height || 0) * (b.width || 0) + (b.label.includes('HD') ? 1000000 : 0);
         return scoreB - scoreA;
     });
 
@@ -147,81 +143,70 @@ async function handleVideoDownload(video) {
         return;
     }
 
-    // ALWAYS DOWNLOAD HIGHEST RESOLUTION DIRECTLY
     const best = finalSources[0];
-    toast(`🚀 Downloading ${best.label} (${best.height}p)...`);
+    toast(`🚀 Downloading ${best.label} (${best.height || 'HQ'}p)...`);
     downloadFile(best.url, `fsnap-video-${best.height || 'hq'}.mp4`);
 }
 
-function extractVerified(text, targetId, list) {
+function extractVerified(text, targetId, list, strictKeysOnly) {
     if (!text || text.length < 50) return;
 
-    const urlKeys = [
+    const combinedKeys = [
         'browser_native_hd_url', 'playable_url_quality_hd', 'get_hd_src', 'hd_src', 'hd_src_no_ratelimit',
         'browser_native_sd_url', 'playable_url', 'sd_src', 'sd_src_no_ratelimit'
     ];
 
-    urlKeys.forEach(key => {
-        // Match both normal and escaped slashes
+    combinedKeys.forEach(key => {
         const regex = new RegExp(`"${key}":"(https:[^"]+)"`, 'g');
         let match;
         while ((match = regex.exec(text)) !== null) {
             const url = sanitize(match[1]);
-            if (url.includes('fbcdn.net')) {
-                // Proximity check if targetId is provided
-                if (targetId) {
-                    const proximityCheck = text.substring(Math.max(0, match.index - 10000), match.index + 10000);
-                    if (!proximityCheck.includes(targetId)) continue;
-                }
+            if (!url.includes('fbcdn.net')) continue;
 
-                const area = text.substring(Math.max(0, match.index - 1500), match.index + 1500);
+            // Tight proximity check for targetId (reduce false matches from other videos on page)
+            if (targetId) {
+                const proxIdx = text.indexOf(targetId, Math.max(0, match.index - 5000));
+                if (proxIdx === -1 || proxIdx > match.index + 5000) continue;
+            }
 
-                // Enhanced resolution detection
-                const hMatch = area.match(/"(?:pixel_)?height":(\d+)/) || area.match(/"height\\":(\d+)/) || area.match(/"frame_height":(\d+)/);
-                const wMatch = area.match(/"(?:pixel_)?width":(\d+)/) || area.match(/"width\\":(\d+)/) || area.match(/"frame_width":(\d+)/);
-                const qMatch = area.match(/"FBQualityLabel":"([^"]+)"/) || area.match(/"quality_label":"([^"]+)"/);
+            const area = text.substring(Math.max(0, match.index - 800), match.index + 800);
+            const hMatch = area.match(/"(?:pixel_)?height":(\d+)/) || area.match(/"height\\":(\d+)/);
+            const wMatch = area.match(/"(?:pixel_)?width":(\d+)/) || area.match(/"width\\":(\d+)/);
+            const qMatch = area.match(/"FBQualityLabel":"([^"]+)"/) || area.match(/"quality_label":"([^"]+)"/);
 
-                let height = hMatch ? parseInt(hMatch[1]) : 0;
-                let width = wMatch ? parseInt(wMatch[1]) : 0;
-                let label = qMatch ? qMatch[1] : (height >= 720 ? 'HD' : 'SD');
+            let height = hMatch ? parseInt(hMatch[1]) : (key.includes('hd') ? 720 : 360);
+            let width = wMatch ? parseInt(wMatch[1]) : Math.round(height * 1.77);
+            let label = qMatch ? qMatch[1] : (height >= 720 ? 'HD' : 'SD');
 
-                // Heuristics for HD keys
-                if (key.toLowerCase().includes('hd')) {
-                    if (!height || height < 720) height = 720;
-                    label = 'HD';
-                }
-
-                if (!height) {
-                    if (label.includes('1080')) height = 1080;
-                    else if (label.includes('720')) height = 720;
-                    else if (label.includes('480')) height = 480;
-                    else height = 360;
-                }
-                if (!width) width = Math.round(height * 1.77);
-
-                if (!list.some(x => x.url === url)) {
-                    list.push({ label, width, height, url });
-                }
+            if (!list.some(x => x.url === url)) {
+                list.push({ label, width, height, url });
             }
         }
     });
 
-    // Generic MP4 search (last resort)
+    if (strictKeysOnly) return;
+
+    // Last resort MP4 search - MUST have height nearby to be considered a video
     const mp4Regex = /"(https:[^"]+?\.mp4[^"]+?)"/g;
     let mp4m;
     while ((mp4m = mp4Regex.exec(text)) !== null) {
         const url = sanitize(mp4m[1]);
-        if (url.includes('fbcdn') && !list.some(x => x.url === url)) {
-            if (targetId) {
-                const proximity = text.substring(Math.max(0, mp4m.index - 5000), mp4m.index + 5000);
-                if (!proximity.includes(targetId)) continue;
-            }
+        if (!url.includes('fbcdn.net') || url.includes('audio') || url.includes('_a.mp4')) continue;
 
-            const area = text.substring(Math.max(0, mp4m.index - 1000), mp4m.index + 1000);
-            const hMatch = area.match(/"(?:pixel_)?height":(\d+)/);
-            let height = hMatch ? parseInt(hMatch[1]) : 360;
-            let label = height >= 720 ? 'HD' : 'SD';
+        if (targetId) {
+            const proxIdx = text.indexOf(targetId, Math.max(0, mp4m.index - 3000));
+            if (proxIdx === -1 || proxIdx > mp4m.index + 3000) continue;
+        }
 
+        const area = text.substring(Math.max(0, mp4m.index - 500), mp4m.index + 500);
+        const hMatch = area.match(/"(?:pixel_)?height":(\d+)/);
+
+        // If no height is found VERY close to the URL, it might be an audio track or unrelated MP4
+        if (!hMatch && !url.includes('_v.mp4')) continue;
+
+        let height = hMatch ? parseInt(hMatch[1]) : 360;
+        let label = height >= 720 ? 'HD' : 'SD';
+        if (!list.some(x => x.url === url)) {
             list.push({ label, width: Math.round(height * 1.77), height, url });
         }
     }
@@ -229,12 +214,9 @@ function extractVerified(text, targetId, list) {
 
 function sanitize(url) {
     if (!url) return "";
-    let s = url.replace(/\\\//g, '/'); // Unescape forward slashes
-    // Unescape unicode (e.g., \u0026 -> &)
+    let s = url.replace(/\\\//g, '/');
     s = s.replace(/\\u([0-9a-fA-F]{4})/g, (match, grp) => String.fromCharCode(parseInt(grp, 16)));
-    // Remove remaining backslashes (like in \")
-    s = s.replace(/\\/g, '');
-    // Fix common HTML entities
+    s = s.replace(/\\"/g, '"').replace(/\\/g, '');
     s = s.replace(/&amp;/g, '&');
     return s;
 }

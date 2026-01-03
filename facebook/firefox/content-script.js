@@ -1,4 +1,4 @@
-// FSnap - Facebook Media Downloader Content Script (v1.1.10 - High-Res Priority)
+// FSnap - Facebook Media Downloader Content Script (v1.1.11 - High-Res Priority)
 
 const observer = new MutationObserver(() => {
     clearTimeout(window.fsnapTimeout);
@@ -90,78 +90,114 @@ async function handleImageDownload(img) {
 }
 
 async function handleVideoDownload(video) {
-    toast("Hunting for high-quality video...");
+    toast("🔍 Hunting for high-quality video...");
     const videoId = findVideoId(video);
+    console.log("FSnap: Found Video ID:", videoId);
 
     let allSources = [];
     const scripts = Array.from(document.querySelectorAll('script'));
+
+    // First pass: look in scripts with ID filter
     for (const script of scripts) {
         const text = script.textContent;
         if (text && videoId && text.includes(videoId)) {
             let pos = text.indexOf(videoId);
             while (pos !== -1) {
-                const chunk = text.substring(Math.max(0, pos - 15000), pos + 15000);
+                const chunk = text.substring(Math.max(0, pos - 20000), pos + 20000);
                 extractVerified(chunk, videoId, allSources);
                 pos = text.indexOf(videoId, pos + 1);
             }
         }
     }
 
-    if (allSources.length === 0 && videoId) {
+    // Second pass: if nothing found, try looking in all scripts without strict ID match (fallback)
+    if (allSources.length === 0) {
+        scripts.forEach(s => {
+            if (s.textContent && (s.textContent.includes('fbcdn.net') || s.textContent.includes('playable_url'))) {
+                extractVerified(s.textContent, null, allSources);
+            }
+        });
+    }
+
+    // Third pass: check page HTML
+    if (allSources.length === 0) {
         extractVerified(document.documentElement.innerHTML, videoId, allSources);
     }
     if (allSources.length === 0) {
         extractVerified(document.documentElement.innerHTML, null, allSources);
     }
 
+    // Deduplicate and filter
     const uniqueMap = new Map();
     allSources.forEach(s => {
         if (!uniqueMap.has(s.url)) uniqueMap.set(s.url, s);
     });
 
     let finalSources = Array.from(uniqueMap.values());
-    // STRICT SORTING: Highest resolution first
-    finalSources.sort((a, b) => b.height - a.height);
+
+    // SMART SORTING: Highest resolution first
+    finalSources.sort((a, b) => {
+        const scoreA = (a.height || 0) * (a.width || 0) + (a.label === 'HD' ? 1000000 : 0);
+        const scoreB = (b.height || 0) * (b.width || 0) + (b.label === 'HD' ? 1000000 : 0);
+        return scoreB - scoreA;
+    });
 
     if (finalSources.length === 0) {
-        toast("Video not found. Try playing it first.");
+        toast("❌ Video not found. Try playing it first.");
         return;
     }
 
     // ALWAYS DOWNLOAD HIGHEST RESOLUTION DIRECTLY
     const best = finalSources[0];
-    toast(`Downloading ${best.label} (${best.width}x${best.height})...`);
-    downloadFile(best.url, `fsnap-video-${best.height}.mp4`);
+    toast(`🚀 Downloading ${best.label} (${best.height}p)...`);
+    downloadFile(best.url, `fsnap-video-${best.height || 'hq'}.mp4`);
 }
 
 function extractVerified(text, targetId, list) {
-    if (!text) return;
-    const urlKeys = ['browser_native_hd_url', 'playable_url_quality_hd', 'hd_src', 'hd_src_no_ratelimit', 'browser_native_sd_url', 'playable_url', 'sd_src', 'sd_src_no_ratelimit'];
+    if (!text || text.length < 50) return;
+
+    const urlKeys = [
+        'browser_native_hd_url', 'playable_url_quality_hd', 'hd_src', 'hd_src_no_ratelimit',
+        'browser_native_sd_url', 'playable_url', 'sd_src', 'sd_src_no_ratelimit'
+    ];
 
     urlKeys.forEach(key => {
+        // Match both normal and escaped slashes
         const regex = new RegExp(`"${key}":"(https:[^"]+)"`, 'g');
         let match;
         while ((match = regex.exec(text)) !== null) {
             const url = sanitize(match[1]);
             if (url.includes('fbcdn.net')) {
-                const proximityCheck = text.substring(Math.max(0, match.index - 5000), match.index + 5000);
-                if (targetId && !proximityCheck.includes(targetId)) continue;
+                // Proximity check if targetId is provided
+                if (targetId) {
+                    const proximityCheck = text.substring(Math.max(0, match.index - 10000), match.index + 10000);
+                    if (!proximityCheck.includes(targetId)) continue;
+                }
 
-                const area = text.substring(Math.max(0, match.index - 1000), match.index + 1000);
-                const hMatch = area.match(/"height":(\d+)/) || area.match(/"height\\":(\d+)/) || area.match(/"pixel_height":(\d+)/) || area.match(/"frame_height":(\d+)/);
-                const wMatch = area.match(/"width":(\d+)/) || area.match(/"width\\":(\d+)/) || area.match(/"pixel_width":(\d+)/) || area.match(/"frame_width":(\d+)/);
+                const area = text.substring(Math.max(0, match.index - 1500), match.index + 1500);
+
+                // Enhanced resolution detection
+                const hMatch = area.match(/"(?:pixel_)?height":(\d+)/) || area.match(/"height\\":(\d+)/) || area.match(/"frame_height":(\d+)/);
+                const wMatch = area.match(/"(?:pixel_)?width":(\d+)/) || area.match(/"width\\":(\d+)/) || area.match(/"frame_width":(\d+)/);
+                const qMatch = area.match(/"FBQualityLabel":"([^"]+)"/) || area.match(/"quality_label":"([^"]+)"/);
 
                 let height = hMatch ? parseInt(hMatch[1]) : 0;
                 let width = wMatch ? parseInt(wMatch[1]) : 0;
-                let label = height >= 720 ? 'HD' : 'SD';
-                if (key.includes('hd')) label = 'HD';
+                let label = qMatch ? qMatch[1] : (height >= 720 ? 'HD' : 'SD');
+
+                // Heuristics for HD keys
+                if (key.toLowerCase().includes('hd')) {
+                    if (!height || height < 720) height = 720;
+                    label = 'HD';
+                }
 
                 if (!height) {
-                    if (label === 'HD') { height = 720; width = 1280; }
-                    else { height = 360; width = 640; }
-                } else if (!width) {
-                    width = Math.round(height * (16 / 9));
+                    if (label.includes('1080')) height = 1080;
+                    else if (label.includes('720')) height = 720;
+                    else if (label.includes('480')) height = 480;
+                    else height = 360;
                 }
+                if (!width) width = Math.round(height * 1.77);
 
                 if (!list.some(x => x.url === url)) {
                     list.push({ label, width, height, url });
@@ -170,19 +206,38 @@ function extractVerified(text, targetId, list) {
         }
     });
 
+    // Generic MP4 search (last resort)
     const mp4Regex = /"(https:[^"]+?\.mp4[^"]+?)"/g;
     let mp4m;
     while ((mp4m = mp4Regex.exec(text)) !== null) {
         const url = sanitize(mp4m[1]);
-        const proximity = text.substring(Math.max(0, mp4m.index - 2000), mp4m.index + 2000);
-        if (targetId && !proximity.includes(targetId)) continue;
         if (url.includes('fbcdn') && !list.some(x => x.url === url)) {
-            list.push({ label: 'SD', width: 640, height: 360, url });
+            if (targetId) {
+                const proximity = text.substring(Math.max(0, mp4m.index - 5000), mp4m.index + 5000);
+                if (!proximity.includes(targetId)) continue;
+            }
+
+            const area = text.substring(Math.max(0, mp4m.index - 1000), mp4m.index + 1000);
+            const hMatch = area.match(/"(?:pixel_)?height":(\d+)/);
+            let height = hMatch ? parseInt(hMatch[1]) : 360;
+            let label = height >= 720 ? 'HD' : 'SD';
+
+            list.push({ label, width: Math.round(height * 1.77), height, url });
         }
     }
 }
 
-function sanitize(url) { return url.replace(/\\/g, '').replace(/&amp;/g, '&'); }
+function sanitize(url) {
+    if (!url) return "";
+    let s = url.replace(/\\\//g, '/'); // Unescape forward slashes
+    // Unescape unicode (e.g., \u0026 -> &)
+    s = s.replace(/\\u([0-9a-fA-F]{4})/g, (match, grp) => String.fromCharCode(parseInt(grp, 16)));
+    // Remove remaining backslashes (like in \")
+    s = s.replace(/\\/g, '');
+    // Fix common HTML entities
+    s = s.replace(/&amp;/g, '&');
+    return s;
+}
 
 function findVideoId(video) {
     let curr = video;
